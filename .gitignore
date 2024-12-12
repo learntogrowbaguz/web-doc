@@ -3,6 +3,7 @@ build-ops.php
 include/jpgraph
 sqlite
 git
-www/images
+log
+shared
 www/robots.txt
 www/doc

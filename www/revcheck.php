@@ -1,8 +1,8 @@
 <?php
 error_reporting(E_ALL ^ E_NOTICE);
 
-include '../include/init.inc.php';
-include '../include/lib_revcheck.inc.php';
+require_once __DIR__ . '/../include/init.inc.php';
+require_once __DIR__ . '/../include/lib_revcheck.inc.php';
 
 if (isset($_GET['lang']) && in_array($_GET['lang'], array_keys($LANGUAGES))) {
     $lang = $_GET['lang'];
@@ -24,22 +24,29 @@ if ($lang == 'en') {
     $tool = 'default';
 }
 
-$DBLANG = SQLITE_DIR . 'rev.php.sqlite';
-
-// Check if db connection can be established and if revcheck for requested lang exists
-if ($dbhandle = new SQLite3($DBLANG)) {
-    $check_lang_tmp = $dbhandle->query("SELECT COUNT(lang) AS count FROM descriptions WHERE lang = '$lang'");
-    $check_lang = $check_lang_tmp->fetchArray();
-    if ($lang != 'en' && $check_lang['count'] < 0) {
-        site_header();
-        echo "<p>This revision check doesn't exist yet.</p>";
-        site_footer();
-        die;
-    }
+if (!defined('SQLITE_DIR')) {
+    site_header();
+    echo "<p>Unable to find SQLite database with revisions.</p>";
+    site_footer();
+    die;
 }
-else {
+
+$DBLANG = SQLITE_DIR . 'status.sqlite';
+
+$dbhandle = new SQLite3($DBLANG);
+if (!$dbhandle) {
     site_header();
     echo "<p>Database connection couldn't be established</p>";
+    site_footer();
+    die;
+}
+
+// Check if db connection can be established and if revcheck for requested lang exists
+$lang_intro = get_language_intro($dbhandle, $lang);
+
+if ($lang !== 'en' && is_null($lang_intro)) {
+    site_header();
+    echo "<p>This revision check doesn't exist yet.</p>";
     site_footer();
     die;
 }
@@ -53,18 +60,14 @@ switch($tool) {
         echo '<p>Error: no translators info found in database.</p>';
     }
     else {
-        $uptodate = get_translators_stats($dbhandle, $lang, 'uptodate');
-        $outdated = get_translators_stats($dbhandle, $lang, 'outdated');
-        $wip      = get_translators_stats($dbhandle, $lang, 'wip');
-
         foreach($translators as $nick =>$data) {
-        $files_w[$nick] = array('uptodate' => '', 'outdated' => '', 'norev' => '', 'wip' => '');
-        $files_w[$nick]['uptodate'] = isset($uptodate[$nick]) ? $uptodate[$nick] : '';
-        $files_w[$nick]['wip'] = isset($wip[$nick]) ? $wip[$nick] : '';
-        $files_w[$nick]['outdated'] = isset($outdated[$nick]) ? $outdated[$nick] : '';
-    }
+            $files_w[$nick] = array('uptodate' => '', 'outdated' => '', 'norev' => '', 'wip' => '');
+            $files_w[$nick]['uptodate'] = $data['countOk'];
+            $files_w[$nick]['wip'] = $data['countOther'];
+            $files_w[$nick]['outdated'] = $data['countOld'];
+        }
 
-    echo <<<TRANSLATORS_HEAD
+        echo <<<TRANSLATORS_HEAD
 <table class="c">
 <tr>
 <th rowspan="2">Name</th>
@@ -80,19 +83,19 @@ switch($tool) {
 </tr>
 TRANSLATORS_HEAD;
 
-    foreach ($translators as $nick => $data) {
-        echo '<tr>',
-        '<td><a href="mailto:'.$data['mail'].'">'.$data['name'].'</a></td>',
-        '<td><a href="/revcheck.php?p=files&amp;user='.$nick.'&amp;lang='.$lang.'">'.$nick.'</a></td>',
-        '<td>'.(($data['karma'] == 'yes') ? '✓' : '&nbsp;').'</td>',
-        '<td>' , @$files_w[$nick]['uptodate'], '</td>',
-        '<td>' , $files_w[$nick]['outdated'], '</td>',
-        '<td>', $files_w[$nick]['wip'], '</td>',
-        '<th>' , @array_sum($files_w[$nick]), '</th>',
-        '</tr>';
-    }
-    echo '</table>';
- }
+        foreach ($translators as $nick => $data) {
+            echo '<tr>',
+            '<td><a href="mailto:'.$data['mail'].'">'.$data['name'].'</a></td>',
+            '<td><a href="/revcheck.php?p=files&amp;user='.$nick.'&amp;lang='.$lang.'">'.$nick.'</a></td>',
+            '<td>'.(($data['karma'] == 'yes') ? '✓' : '&nbsp;').'</td>',
+            '<td>' , @$files_w[$nick]['uptodate'], '</td>',
+            '<td>' , $files_w[$nick]['outdated'], '</td>',
+            '<td>', $files_w[$nick]['wip'], '</td>',
+            '<th>' , @array_sum($files_w[$nick]), '</th>',
+            '</tr>';
+        }
+        echo '</table>';
+     }
  echo gen_date($DBLANG);
  break;
 
@@ -102,26 +105,50 @@ TRANSLATORS_HEAD;
          echo '<p>All files translated? Would be nice... but it\'s probably an error :(</p>';
      } else {
          $num = count($missfiles);
+         $last_dir = false;
+         $first_dir = false;
+         echo '<p>Choose a directory:</p>';
+         echo '<form method="get" action="revcheck.php"><p><select name="dir">';
+         foreach ($missfiles as $miss) {
+             if (isset($_GET['dir']) && $_GET['dir'] == $miss['dir']) {
+                 $selected = ' selected="selected"';
+             } else {
+                 $selected = '';
+             }
+             if (!$last_dir || $last_dir != $miss['dir']) {
+                 echo '<option value="'.$miss['dir'].'"'.$selected.'>'.$miss['dir'].'</option>';
+                 $last_dir = $miss['dir'];
+                 if (!$first_dir) $first_dir = $last_dir;
+             }
+         }
+         echo '</select>';
+         echo '<input type="hidden" name="p" value="missfiles">';
+         echo '<input type="hidden" name="lang" value="'.$lang.'">';
+         echo '<input type="submit" value="See untranslated files"></p></form>';
+
          echo '<table class="c">';
-         echo '<tr><th rowspan="1">Available for translation ('.$num.' files):</th><th>Commit Hash</th><th colspan="1">kB</th></tr>';
+         echo '<tr><th rowspan="1">Available for translation</th><th>Commit Hash</th><th colspan="1">kB</th></tr>';
 
          $last_dir = false;
          $total_size = 0;
+         $dir = isset($_GET['dir']) ? $_GET['dir'] : $first_dir;
          foreach ($missfiles as $miss) {
-         if (!$last_dir || $last_dir != $miss['dir']) {
-         echo '<tr><th colspan="3">'.$miss['dir'].'</th></tr>';
-         $last_dir = $miss['dir'];
+             if ($dir == $miss['dir']) {
+                 if (!$last_dir || $last_dir != $miss['dir']) {
+                     echo '<tr><th colspan="3">'.$miss['dir'].'</th></tr>';
+                     $last_dir = $miss['dir'];
+                 }
+                 $key = $miss['dir'] == '' ? "/" : $miss['dir']."/". $miss['file'];
+                 echo "<tr><td><a href='https://github.com/php/doc-en/blob/{$miss['revision']}/$key'>{$miss['file']}</a></td><td>{$miss['revision']}</td><td>{$miss['size']}</td></tr>";
+                 $total_size += $miss['size'];
+                 // flush every 200 kbytes
+                 if (($total_size % 200) == 0)
+                     flush();
+             }
+         }
+         echo "<tr><th colspan='3'>Total Size: $total_size kB</th></tr>";
+         echo '</table>';
      }
-     $key = $miss['dir'] == '' ? "/" : $miss['dir']."/". $miss['file'];
-     echo "<tr><td><a href='https://github.com/php/doc-en/blob/{$miss['revision']}/$key'>{$miss['file']}</a></td><td>{$miss['revision']}</td><td>{$miss['size']}</td></tr>";
-     $total_size += $miss['size'];
-     // flush every 200 kbytes
-     if (($total_size % 200) == 0)
-         flush();
-     }
-     echo "<tr><th colspan='3'>Total Size ($num files): $total_size kB</th></tr>";
-     echo '</table>';
- }
  echo gen_date($DBLANG);
  break;
 
@@ -161,17 +188,16 @@ TRANSLATORS_HEAD;
      } else {
          $num = count($misstags);
          echo '<table class="c">';
-         echo '<tr><th rowspan="2">Files without EN-Revision number ('.$num.' files):</th><th colspan="3">Sizes in kB</th></tr>';
-         echo '<tr><th>en</th><th>'.$lang.'</th><th>diff</th></tr>';
+         echo '<tr><th>Files without EN-Revision number ('.$num.' files):</th></tr>';
 
          $last_dir = false;
 
          foreach ($misstags as $row) {
              if (!$last_dir || $last_dir != $row['dir']) {
-             echo '<tr><th colspan="4">'.$row['dir'].'</th></tr>';
+             echo '<tr><th>'.$row['dir'].'</th></tr>';
              $last_dir = $row['dir'];
           }
-          echo '<tr><td>'.$row['name'].'</td><td>'.$row['en_size'].'</td><td>'.$row['trans_size'].'</td><td>'.(intval($row['en_size'] - $row['trans_size'])).'</td></tr>';
+          echo '<tr><td>'.$row['name'].'</td></tr>';
      }
      echo '</table>';
  }
@@ -179,88 +205,36 @@ TRANSLATORS_HEAD;
  break;
 
  case 'filesummary':
-     $files_uptodate = get_stats($dbhandle, $lang, 'uptodate');
-     $files_outdated = get_stats($dbhandle, $lang, 'outdated');
-     $files_norev    = get_stats($dbhandle, $lang, 'norev');
-     $files_notrans  = get_stats($dbhandle, $lang, 'notrans');
-     $files_wip      = get_stats($dbhandle, $lang, 'wip');
-     $files_notinen  = get_stats($dbhandle, $lang, 'notinen');
-
-     $files_outdated[1] = $files_outdated[1] > 0 ? $files_outdated[1] : 0;
-     $files_norev[1] = $files_norev[1] > 0 ? $files_norev[1] : 0;
-     $files_wip[1] = $files_wip[1] > 0 ? $files_wip[1] : 0;
-     $files_notinen[1] = $files_notinen[1] > 0 ? $files_notinen[1] : 0;
+     $stats = get_lang_stats($dbhandle, $lang);
 
      echo '<table class="c">';
      echo '<tr><th>File status type</th><th>Number of files</th><th>Percent of files</th><th>Size of files (kB)</th><th>Percent of size</th></tr>';
 
-     $percent[0] = 0;
-     $percent[1] = 0;
-     $count = count_en_files($dbhandle);
+     foreach ($TRANSLATION_STATUSES as $status => $description) {
+         echo
+            '<tr>',
+            '<td>', $description, '</td>',
+            '<td>', $stats[$status]['total'] ?? 0, '</td>',
+            '<td>',
+            sprintf('%.2f%%', 100 * (($stats[$status]['total'] ?? 0) / $stats['total']['total'])),
+            '</td>',
+            '<td>', $stats[$status]['size'] ?? 0, '</td>',
+            '<td>',
+            sprintf('%.2f%%', 100 * (($stats[$status]['size'] ?? 0) / $stats['total']['size'])),
+            '</td>',
+            '</tr>';
+     }
+     echo
+        '<tr>',
+        '<th>Total</th>',
+        '<th>', $stats['total']['total'] ?? 0, '</th>',
+        '<th>100.00%</th>',
+        '<th>', $stats['total']['size'] ?? 0, '</th>',
+        '<th>100.00%</th>',
+        '</tr>';
+     echo '</table>';
 
-     $percent[1] += $files_uptodate[1];
-     $percent[1] += $files_outdated[1];
-     $percent[1] += $files_norev[1];
-     $percent[1] += $files_notrans[1];
-     $percent[1] += $files_wip[1];
-
-     $num_uptodate_percent = number_format($files_uptodate[0] * 100 / $count, 2 );
-     $num_outdated_percent = number_format($files_outdated[0] * 100 / $count, 2 );
-     $num_wip_percent = number_format($files_wip[0] * 100 / $count, 2 );
-     $num_norev_percent = number_format($files_norev[0] * 100 / $count, 2 );
-     $num_notrans_percent = number_format($files_notrans[0] * 100 / $count, 2 );
-
-     $size_uptodate_percent = number_format($files_uptodate[1] * 100 / $percent[1], 2 );
-     $size_outdated_percent = number_format($files_outdated[1] * 100 / $percent[1], 2 );
-     $size_wip_percent = number_format($files_wip[1] * 100 / $percent[1], 2 );
-     $size_norev_percent = number_format($files_norev[1] * 100 / $percent[1], 2 );
-     $size_notrans_percent = number_format($files_notrans[1] * 100 / $percent[1], 2 );
-     print <<<HTML
-<tr>
-<td>Up to date files</td>
-<td>{$files_uptodate[0]}</td>
-<td>{$num_uptodate_percent}%</td>
-<td>{$files_uptodate[1]}</td>
-<td>{$size_uptodate_percent}%</td>
-</tr><tr>
-<td>Outdated files</td>
-<td>{$files_outdated[0]}</td>
-<td>{$num_outdated_percent}%</td>
-<td>{$files_outdated[1]}</td>
-<td>{$size_outdated_percent}%</td>
-</tr><tr>
-<td>Work in progress</td>
-<td>{$files_wip[0]}</td>
-<td>{$num_wip_percent}%</td>
-<td>{$files_wip[1]}</td>
-<td>{$size_wip_percent}%</td>
-</tr><tr>
-<td>Files without revision number</td>
-<td>{$files_norev[0]}</td>
-<td>{$num_norev_percent}%</td>
-<td>$files_norev[1]</td>
-<td>{$size_norev_percent}%</td>
-</tr><tr>
-<td>Not in EN tree</td>
-<td>{$files_notinen[0]}</td>
-<td>0.00%</td>
-<td>{$files_notinen[1]}</td>
-<td>0.00%</td>
-</tr><tr>
-<td>Files available for translation	</td>
-<td>{$files_notrans[0]}</td>
-<td>{$num_notrans_percent}%</td>
-<td>{$files_notrans[1]}</td>
-<td>{$size_notrans_percent}%</td>
-</tr><tr>
-<th>Files total</th>
-<th>$count</th>
-<th>100%</th>
-<th>{$percent[1]}</th
-><th>100%</th>
-</tr></table>
-HTML;
- echo gen_date($DBLANG);
+     echo gen_date($DBLANG);
  break;
 
 
@@ -268,14 +242,6 @@ HTML;
      // we need a dir to browse
      $dirs = get_dirs($dbhandle, $lang);
      $users = get_translators($dbhandle, $lang);
-     /*
-     if (empty($dirs)) {
-         echo '<p>Error: no directories found in database.</p>';
-         $sidebar = nav_tools($lang);
-         site_footer($sidebar);
-         die;
-     }
-     */
      echo '<p>This tool allows you to check which files in your translation need updates. To show the list ';
      echo 'choose a directory (it doesn\'t work recursively) or translator.</p>';
      echo '<p>When you click on the filename you will see the plaintext diff showing changes between revisions, so ';
@@ -398,33 +364,24 @@ END_OF_MULTILINE;
  break;
 
  case 'graph':
-     $path = "images/revcheck/info_revcheck_php_$lang.png";
-     if (is_readable($path)) {
-         echo '<img src="'.$path.'" alt="info">';
-         echo gen_date($DBLANG);
-     } else {
-         echo "<p>Can't find graph.</p>";
-     }
- break;
-
  default:
      if ($lang == 'en') {
-         echo '<img src="images/revcheck/info_revcheck_php_all_lang.png" alt="Info" class="chart">';
+         echo '<img src="img-status-all.php" width="662" height="262" alt="Info" class="chart">';
          echo '<p>This is all what we can show for original manual. To get more tools, please select translation language.</p>';
          echo gen_date($DBLANG);
          $sidebar = nav_languages();
          site_footer($sidebar);
      } else {
-         $intro_result = $dbhandle->query("SELECT intro FROM descriptions WHERE lang = '$lang'");
-         $intro = $intro_result->fetchArray();
          echo '<h2>Intro for language</h2>';
-         echo '<p>'.$intro[0].'</p>';
+         echo '<p>'.$lang_intro.'</p>';
+         echo '<img src="img-status-lang.php?lang=', $lang, '" width="680" height="300" alt="info">';
+         echo gen_date($DBLANG);
          echo '<p>Links to available tools are placed on the right sidebar.</p>';
      }
  break;
 }
 
 if ($lang != 'en') {
-    $sidebar = nav_tools($lang);
+    $sidebar = nav_languages($lang);
     site_footer($sidebar);
 }

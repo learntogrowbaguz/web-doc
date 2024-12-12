@@ -1,45 +1,37 @@
 <?php
-$time_start = microtime(true);
 
-include '../include/jpgraph/src/jpgraph.php';
-include '../include/jpgraph/src/jpgraph_pie.php';
-include '../include/jpgraph/src/jpgraph_pie3d.php';
+require_once __DIR__ . '/../include/jpgraph/src/jpgraph.php';
+require_once __DIR__ . '/../include/jpgraph/src/jpgraph_pie.php';
+require_once __DIR__ . '/../include/jpgraph/src/jpgraph_pie3d.php';
 
-include '../include/init.inc.php';
-include '../include/lib_revcheck.inc.php';
-include '../include/lib_proj_lang.inc.php';
+require_once __DIR__ . '/../include/init.inc.php';
+require_once __DIR__ . '/../include/lib_revcheck.inc.php';
+require_once __DIR__ . '/../include/lib_proj_lang.inc.php';
 
-$idx = new SQLite3(SQLITE_DIR . 'rev.php.sqlite');
+$idx = new SQLite3(SQLITE_DIR . 'status.sqlite');
 
 $available_langs = revcheck_available_languages($idx);
 
-$langs = array_keys($LANGUAGES);
-foreach ($langs as $lang) {
-    if (!in_array($lang, $available_langs)) {
-        echo "Documentation for $lang language does not exist.\n";
-    } else {
-        generate_image($lang, $idx);
-        echo "Generated images/revcheck/info_revcheck_php_$lang.png\n";
-    }
-}
+$lang = $_GET['lang'];
 
-$time = round(microtime(true) - $time_start, 3);
-echo "Graphs generated in {$time}s\n";
+if (!in_array($lang, $available_langs)) {
+    die("Information for $lang language does not exist.");
+} else {
+    generate_image($lang, $idx);
+}
 
 function generate_image($lang, $idx) {
     global $LANGUAGES;
 
-    $up_to_date = get_stats($idx, $lang, 'uptodate');
-    $up_to_date = $up_to_date[0];
+    $stats = get_lang_stats($idx, $lang);
+
+    $up_to_date = $stats['TranslatedOk']['total'] ?? 0;
     //
-    $outdated = @get_stats($idx, $lang, 'outdated');
-    $outdated = $outdated[0];
+    $outdated = $stats['TranslatedOld']['total'] ?? 0;
     //
-    $missing = get_stats($idx, $lang, 'notrans');
-    $missing = $missing[0];
+    $missing = $stats['Untranslated']['total'] ?? 0;
     //
-    $no_tag = @get_stats($idx, $lang, 'norev');
-    $no_tag = $no_tag[0];
+    $no_tag = $stats['RevTagProblem']['total'] ?? 0;
 
     $data = array(
         $up_to_date,
@@ -90,5 +82,5 @@ function generate_image($lang, $idx) {
     $p1->SetLegends($legend);
 
     $graph->Add($p1);
-    $graph->Stroke("../www/images/revcheck/info_revcheck_php_$lang.png");
+    $graph->Stroke();
 }
